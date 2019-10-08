@@ -1,10 +1,11 @@
 # Kubernetes cluster
 A vagrant script for setting up a Kubernetes cluster using Kubeadm
+Cloned from : https://github.com/ecomm-integration-ballerina/kubernetes-cluster
 
 ## Pre-requisites
 
- * **[Vagrant 2.1.4+](https://www.vagrantup.com)**
- * **[Virtualbox 5.2.18+](https://www.virtualbox.org)**
+ * **[Vagrant 2.2.5+](https://www.vagrantup.com)**
+ * **[Virtualbox 6.0.12+](https://www.virtualbox.org)**
 
 ## How to Run
 
@@ -24,7 +25,7 @@ servers = [
         :name => "k8s-node-3",
         :type => "node",
         :box => "ubuntu/xenial64",
-        :box_version => "20180831.0.0",
+        :box_version => "20191005.0.0",
         :eth1 => "192.168.205.13",
         :mem => "2048",
         :cpu => "2"
