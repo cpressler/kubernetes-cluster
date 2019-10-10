@@ -36,29 +36,65 @@ servers = [
 
 # This script to install k8s using kubeadm will get executed after a box is provisioned
 $configureBox = <<-SCRIPT
-
-    # install docker v17.03
-    # reason for not using docker provision is that it always installs latest version of the docker, but kubeadm requires 17.03 or older
+    echo  "Starting to execute configureBox"
+    # install docker v18.09
+    # reason for not using docker provision is that it always installs latest version of the docker, but kubeadm requires 18.09 or older
     apt-get update
+    # Install Docker CE
+    ## Set up the repository:
+    ### Install packages to allow apt to use a repository over HTTPS
     apt-get install -y apt-transport-https ca-certificates curl software-properties-common
-    #curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -
+    ### Add Docker’s official GPG key
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -
+
+    echo  "doing the docker now"
+    ### Add Docker apt repository.
     add-apt-repository "deb https://download.docker.com/linux/$(. /etc/os-release; echo "$ID") $(lsb_release -cs) stable"
-    #apt-get update && apt-get install -y docker-ce=$(apt-cache madison docker-ce | grep 17.03 | head -1 | awk '{print $3}')
+    ## Install Docker CE.
+    echo  "install docker"
+    apt-get update && apt-get install -y docker-ce=$(apt-cache madison docker-ce | grep 18.09 | head -1 | awk '{print $3}')
+
+    echo  "setup docker daemon"
+    # Setup daemon.
+    cat > /etc/docker/daemon.json <<EOF
+    {
+      "exec-opts": ["native.cgroupdriver=systemd"],
+      "log-driver": "json-file",
+      "log-opts": {
+      "max-size": "100m"
+      },
+      "storage-driver": "overlay2"
+    }
+EOF
+
+    echo "making docker systemd directory"
+    mkdir -p /etc/systemd/system/docker.service.d
+    ls -al /etc/systemd/system/
+
+    # Restart docker.
+    systemctl daemon-reload
+    systemctl restart docker
 
     # run docker commands as vagrant user (sudo not required)
+    echo  "adding vagrant to the docker group"
     usermod -aG docker vagrant
 
     # install kubeadm
+    echo "getting prerequisites for kubeadm"
     apt-get install -y apt-transport-https curl
     curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+    
     cat <<EOF >/etc/apt/sources.list.d/kubernetes.list
     deb http://apt.kubernetes.io/ kubernetes-xenial main
 EOF
+    echo "starting the kube stuff"
     apt-get update
     apt-get install -y kubelet kubeadm kubectl
     apt-mark hold kubelet kubeadm kubectl
+    echo  "finished doing the kube stuff"
 
     # kubelet requires swap off
+    echo "kubelet requires swap off"
     swapoff -a
 
     # keep swap off after reboot
@@ -67,8 +103,13 @@ EOF
     # ip of this box
     IP_ADDR=`ifconfig enp0s8 | grep Mask | awk '{print $2}'| cut -f2 -d:`
     # set node-ip
+    echo "setting default values for kubelet"
+    ls -al /etc/default
+    touch /etc/default/kubelet
+    chmod 644 /etc/default/kubelet
     sudo sed -i "/^[^#]*KUBELET_EXTRA_ARGS=/c\KUBELET_EXTRA_ARGS=--node-ip=$IP_ADDR" /etc/default/kubelet
     sudo systemctl restart kubelet
+    echo  "finished configureBox"
 SCRIPT
 
 $configureMaster = <<-SCRIPT
@@ -78,24 +119,36 @@ $configureMaster = <<-SCRIPT
 
     # install k8s master
     HOST_NAME=$(hostname -s)
+    echo "Executing kubeadm init"
     kubeadm init --apiserver-advertise-address=$IP_ADDR --apiserver-cert-extra-sans=$IP_ADDR  --node-name $HOST_NAME --pod-network-cidr=172.16.0.0/16
 
     #copying credentials to regular user - vagrant
+    echo "copying credentials to regular user - vagrant"
     sudo --user=vagrant mkdir -p /home/vagrant/.kube
+    echo "Executing ls -al /etc/kubernetes"
+    ls -al /etc/kubernetes
     cp -i /etc/kubernetes/admin.conf /home/vagrant/.kube/config
     chown $(id -u vagrant):$(id -g vagrant) /home/vagrant/.kube/config
 
-    # install Calico pod network addon
     export KUBECONFIG=/etc/kubernetes/admin.conf
-    kubectl apply -f https://raw.githubusercontent.com/ecomm-integration-ballerina/kubernetes-cluster/master/calico/rbac-kdd.yaml
-    kubectl apply -f https://raw.githubusercontent.com/ecomm-integration-ballerina/kubernetes-cluster/master/calico/calico.yaml
 
+    # install Calico pod network addon
+    #echo "Executing Calico pod network addon"
+    #kubectl apply -f https://raw.githubusercontent.com/ecomm-integration-ballerina/kubernetes-cluster/master/calico/rbac-kdd.yaml
+    #kubectl apply -f https://raw.githubusercontent.com/ecomm-integration-ballerina/kubernetes-cluster/master/calico/calico.yaml
+
+    echo "Executing Flannel pod network addon"
+    kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+
+    # create the join cluster command for the slave nodes to execute
     kubeadm token create --print-join-command >> /etc/kubeadm_join_cmd.sh
     chmod +x /etc/kubeadm_join_cmd.sh
 
     # required for setting up password less ssh between guest VMs
+    echo "Executing ssh changes for vagrant user"
     sudo sed -i "/^[^#]*PasswordAuthentication[[:space:]]no/c\PasswordAuthentication yes" /etc/ssh/sshd_config
     sudo service sshd restart
+    echo  "finished configureMaster"
 
 SCRIPT
 
@@ -103,7 +156,9 @@ $configureNode = <<-SCRIPT
     echo "This is worker"
     apt-get install -y sshpass
     sshpass -p "vagrant" scp -o StrictHostKeyChecking=no vagrant@192.168.205.10:/etc/kubeadm_join_cmd.sh .
+    echo  "configureNode joing cluster"
     sh ./kubeadm_join_cmd.sh
+    echo  "finished configureNode"
 SCRIPT
 
 Vagrant.configure("2") do |config|
@@ -126,7 +181,7 @@ Vagrant.configure("2") do |config|
             end
 
             # we cannot use this because we can't install the docker version we want - https://github.com/hashicorp/vagrant/issues/4871
-            config.vm.provision "docker"
+            #config.vm.provision "docker"
 
             config.vm.provision "shell", inline: $configureBox
 
