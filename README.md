@@ -59,7 +59,8 @@ k8s-node-2   Ready    <none>   64m   v1.16.1   10.0.2.15     <none>        Ubunt
  
  
 ```
-Verify the above command show  all the nodes to be in the Ready State
+Verify the above command show  all the nodes to be in the Ready State. If in the Not Ready state that usually means the kubernetes CNI did
+not get executed properly. In this demo we are using the Flannel CNI as referenced in the Vagrantfile.
 
 ##### Do a test deploy of a docker app
 ```bash
