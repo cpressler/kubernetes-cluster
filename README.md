@@ -78,6 +78,17 @@ vagrant destroy -f
 
 You can destroy individual machines by vagrant destroy k8s-node-1 -f
 
+#### Special Notes
+per this post
+https://medium.com/@toja/running-k3s-with-metallb-on-vagrant-bd9603a5113b
+
+vagrant up
+Getting there wasn’t easy.
+Out of the box flannel will not work with vagrant, neither with k8s.
+The default flannel.yml file requires  modifications to work on this setup:
+To specify the interface to be used by flannel: --iface=enp0s8 . The first interface on a vm is on the network which allows vagrant to communicate with and to provide NAT traffic to the guest.
+.
+
 ## Licensing
 
 [Apache License, Version 2.0](http://opensource.org/licenses/Apache-2.0).

@@ -3,32 +3,36 @@
 
 # :box_version => "20180831.0.0",
 # https://app.vagrantup.com/ubuntu/boxes/xenial64/versions/20191005.0.0
+#        :box => "ubuntu/xenial64",
+#        :box_version => "20191005.0.0",
 
+#  config.vm.box = "ubuntu/bionic64"
+#  config.vm.box_version = "20191125.0.0"
 servers = [
     {
         :name => "k8s-head",
         :type => "master",
-        :box => "ubuntu/xenial64",
-        :box_version => "20191005.0.0",
-        :eth1 => "192.168.205.10",
+        :box => "ubuntu/bionic64",
+        :box_version => "20191125.0.0",
+        :eth1 => "192.168.33.11",
         :mem => "2048",
         :cpu => "2"
     },
    {
         :name => "k8s-node-1",
         :type => "node",
-        :box => "ubuntu/xenial64",
-        :box_version => "20191005.0.0",
-        :eth1 => "192.168.205.11",
+        :box => "ubuntu/bionic64",
+        :box_version => "20191125.0.0",
+        :eth1 => "192.168.33.12",
         :mem => "2048",
         :cpu => "2"
     },
     {
         :name => "k8s-node-2",
         :type => "node",
-        :box => "ubuntu/xenial64",
-        :box_version => "20191005.0.0",
-        :eth1 => "192.168.205.12",
+        :box => "ubuntu/bionic64",
+        :box_version => "20191125.0.0",
+        :eth1 => "192.168.33.13",
         :mem => "2048",
         :cpu => "2"
     }
@@ -75,6 +79,20 @@ EOF
     systemctl daemon-reload
     systemctl restart docker
 
+    echo "creating rc.local to add routing and iptables stuff"
+    cat <<EOF > /etc/rc.local
+    #!/bin/sh -e
+    #
+    route add -net 192.168.90.0/24 gw 192.168.33.1
+    exit 0
+    EOF
+      chmod 0755 /etc/rc.local
+      # for kube-proxy (iptables)
+      #
+      echo net.bridge.bridge-nf-call-iptables=1 >> /etc/sysctl.conf
+      modprobe br_netfilter
+      sysctl -p
+
     # run docker commands as vagrant user (sudo not required)
     echo  "adding vagrant to the docker group"
     usermod -aG docker vagrant
@@ -107,7 +125,12 @@ EOF
     ls -al /etc/default
     touch /etc/default/kubelet
     chmod 644 /etc/default/kubelet
-    sudo sed -i "/^[^#]*KUBELET_EXTRA_ARGS=/c\KUBELET_EXTRA_ARGS=--node-ip=$IP_ADDR" /etc/default/kubelet
+    # this command does not work on emtpy file
+    # sudo sed -i "/^[^#]*KUBELET_EXTRA_ARGS=/c\KUBELET_EXTRA_ARGS=--node-ip=$IP_ADDR" /etc/default/kubelet
+    # use this one instead. This fixes the proper ip address for worker nodes and fixes
+    # issues with accessing logs
+    # reference https://medium.com/@joatmon08/playing-with-kubeadm-in-vagrant-machines-part-2-bac431095706
+    echo "KUBELET_EXTRA_ARGS=--node-ip=$IP_ADDR" | sudo tee /etc/default/kubelet
     sudo systemctl restart kubelet
     echo  "finished configureBox"
 SCRIPT
@@ -138,7 +161,39 @@ $configureMaster = <<-SCRIPT
     #kubectl apply -f https://raw.githubusercontent.com/ecomm-integration-ballerina/kubernetes-cluster/master/calico/calico.yaml
 
     echo "Executing Flannel pod network addon"
-    kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+    #kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+    ## Deploy flannel, custom file with updated iface name and k8s network cidr
+    kubectl apply -f /vagrant/flannel/kube-flannel.yml
+
+    # apply the metallb load balancer
+  echo "Executing METALLB  addon"
+  curl -s https://raw.githubusercontent.com/google/metallb/v0.8.3/manifests/metallb.yaml >  /root/metallb.yaml
+  sed  -i '1i ---' /root/metallb.yaml
+  cat << EOF > /root/metallb_configmap.yaml
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  namespace: metallb-system
+  name: config
+data:
+  config: |
+    peers:
+    - my-asn: 64522
+      peer-asn: 64512
+      peer-address: 192.168.33.1
+      peer-port: 179
+      router-id: 192.168.33.1
+    address-pools:
+    - name: my-ip-space
+      protocol: bgp
+      avoid-buggy-ips: true
+      addresses:
+      - 192.168.90.192/26
+EOF
+  kubectl apply -f /root/metallb.yaml
+  kubectl apply -f /root/metallb_configmap.yaml
+
 
     # create the join cluster command for the slave nodes to execute
     kubeadm token create --print-join-command >> /etc/kubeadm_join_cmd.sh
@@ -161,6 +216,49 @@ $configureNode = <<-SCRIPT
     echo  "finished configureNode"
 SCRIPT
 
+$configureRouter=<<-SCRIPT
+  apt-get update
+  apt-get install -y curl bird
+  mv /etc/bird/bird.conf /etc/bird/bird.conf.original
+  cat <<EOF > /etc/bird/bird.conf
+router id 192.168.33.1;
+protocol direct {
+  interface "lo"; # Restrict network interfaces BIRD works with
+}
+protocol kernel {
+  persist; # Don't remove routes on bird shutdown
+  scan time 20; # Scan kernel routing table every 20 seconds
+  import all; # Default is import all
+  export all; # Default is export none
+}
+# This pseudo-protocol watches all interface up/down events.
+protocol device {
+  scan time 10; # Scan interfaces every 10 seconds
+}
+protocol bgp peer2 {
+  local as 64512;
+  neighbor 192.168.33.11 as 64522;
+  import all;
+  export all;
+}
+protocol bgp peer1 {
+  local as 64512;
+  neighbor 192.168.33.12 as 64522;
+  import all;
+  export all;
+}
+protocol bgp peer3 {
+  local as 64512;
+  neighbor 192.168.33.13 as 64522;
+  import all;
+  export all;
+}
+EOF
+  service bird restart
+  echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/55-kubeadm.conf
+  sysctl -p /etc/sysctl.d/55-kubeadm.conf
+SCRIPT
+
 Vagrant.configure("2") do |config|
 
     servers.each do |opts|
@@ -174,7 +272,7 @@ Vagrant.configure("2") do |config|
             config.vm.provider "virtualbox" do |v|
 
                 v.name = opts[:name]
-            	v.customize ["modifyvm", :id, "--groups", "/Kubernetes Development"]
+            	v.customize ["modifyvm", :id, "--groups", "/K8 Development"]
                 v.customize ["modifyvm", :id, "--memory", opts[:mem]]
                 v.customize ["modifyvm", :id, "--cpus", opts[:cpu]]
 
@@ -190,9 +288,31 @@ Vagrant.configure("2") do |config|
             else
                 config.vm.provision "shell", inline: $configureNode
             end
-
         end
-
     end
 
+  # now configure a router
+  config.vm.define "router" do |router|
+    router.vm.box = "ubuntu/bionic64"
+    router.vm.network "public_network", bridge: "em1", ip: "192.168.102.254"
+    router.vm.network "private_network",
+                       ip: "192.168.33.1",
+                       netmask: "255.255.255.0",
+                       auto_config: true,
+                       virtualbox__intnet: "k8s-metallb-net"
+    router.vm.network "private_network",
+                       ip: "192.168.90.1",
+                       netmask: "255.255.255.0",
+                       auto_config: true,
+                       virtualbox__intnet: "client-metallb-net"
+     router.vm.host_name = "router"
+     router.ssh.insert_key = false
+     router.vm.provision "shell", inline: $configureRouter
+     router.vm.provider "virtualbox" do |v|
+       v.customize ["modifyvm", :id, "--ostype", "Debian_64"]
+       v.customize ["modifyvm", :id, "--groups", "/K8 Development"]
+       v.cpus = 1
+       v.memory = 512
+     end
+  end
 end 
