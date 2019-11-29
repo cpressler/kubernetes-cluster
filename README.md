@@ -69,6 +69,26 @@ vagrant@k8s-head:~$ kubectl get deployments
 NAME                  READY   UP-TO-DATE   AVAILABLE   AGE
 kubernetes-bootcamp   0/1     1            0           14s
 ```
+####
+Copying the kubernetes cluster config to your local host
+
+from host this copies the config back to host so it can be used
+```bash
+vagrant ssh k8s-head
+scp ~/.kube/config yourusername@host-ip:/home/yourusername/.kube/
+exit
+Now you can execute and kubernetes commands on the host
+```
+#### Adding host route to kubernetes load balancer
+
+This command will forward packets for the load balancer to the "router" VM
+```bash
+sudo route add -net 192.168.90.0/24 gw 192.168.102.254
+this will test the example service deployed
+From host or from router vm
+curl http://192.168.90.192
+```
+
 ## Clean-up
 
 Execute the following command to remove the virtual machines created for the Kubernetes cluster.
@@ -77,6 +97,12 @@ vagrant destroy -f
 ```
 
 You can destroy individual machines by vagrant destroy k8s-node-1 -f
+
+### METALLB Add on
+Metallb is a add on that allows creating load balancers on a bare metal K8s cluster.
+
+
+
 
 #### Special Notes
 per this post

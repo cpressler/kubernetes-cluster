@@ -80,12 +80,21 @@ EOF
     systemctl restart docker
 
     echo "creating rc.local to add routing and iptables stuff"
+    route add -net 192.168.90.0/24 gw 192.168.33.1
+
+    echo "adding the host network route soe we can access the load balancer"
+    route add -net 192.168.102.0/24 gw 192.168.33.1
+
     cat <<EOF > /etc/rc.local
     #!/bin/sh -e
     #
     route add -net 192.168.90.0/24 gw 192.168.33.1
+    # host network entry allows us to use router box to forward from linux host
+    # also need to add a route on the linux host sudo route add -net 192.168.90.0/24 gw 192.168.102.254
+    route add -net 192.168.102.0/24 gw 192.168.33.1
+
     exit 0
-    EOF
+EOF
       chmod 0755 /etc/rc.local
       # for kube-proxy (iptables)
       #
@@ -101,10 +110,10 @@ EOF
     echo "getting prerequisites for kubeadm"
     apt-get install -y apt-transport-https curl
     curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
-    
-    cat <<EOF >/etc/apt/sources.list.d/kubernetes.list
-    deb http://apt.kubernetes.io/ kubernetes-xenial main
-EOF
+
+
+    echo "installing the kubernetes repo"
+    apt-add-repository "deb http://apt.kubernetes.io/ kubernetes-xenial main"
     echo "starting the kube stuff"
     apt-get update
     apt-get install -y kubelet kubeadm kubectl
@@ -119,7 +128,8 @@ EOF
     sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
 
     # ip of this box
-    IP_ADDR=`ifconfig enp0s8 | grep Mask | awk '{print $2}'| cut -f2 -d:`
+    #IP_ADDR=`ifconfig enp0s8 | grep Mask | awk '{print $2}'| cut -f2 -d:`
+    IP_ADDR=$(ip a show enp0s8 | grep "inet " | awk '{print $2}' | cut -d / -f1)
     # set node-ip
     echo "setting default values for kubelet"
     ls -al /etc/default
@@ -132,18 +142,20 @@ EOF
     # reference https://medium.com/@joatmon08/playing-with-kubeadm-in-vagrant-machines-part-2-bac431095706
     echo "KUBELET_EXTRA_ARGS=--node-ip=$IP_ADDR" | sudo tee /etc/default/kubelet
     sudo systemctl restart kubelet
+    sudo apt install inetutils-traceroute
     echo  "finished configureBox"
 SCRIPT
 
 $configureMaster = <<-SCRIPT
     echo "This is master"
     # ip of this box
-    IP_ADDR=`ifconfig enp0s8 | grep Mask | awk '{print $2}'| cut -f2 -d:`
+    #IP_ADDR=`ifconfig enp0s8 | grep Mask | awk '{print $2}'| cut -f2 -d:`
+    IP_ADDR=$(ip a show enp0s8 | grep "inet " | awk '{print $2}' | cut -d / -f1)
 
     # install k8s master
     HOST_NAME=$(hostname -s)
     echo "Executing kubeadm init"
-    kubeadm init --apiserver-advertise-address=$IP_ADDR --apiserver-cert-extra-sans=$IP_ADDR  --node-name $HOST_NAME --pod-network-cidr=172.16.0.0/16
+    kubeadm init --apiserver-advertise-address=$IP_ADDR --apiserver-cert-extra-sans=$IP_ADDR  --node-name $HOST_NAME --pod-network-cidr=10.244.0.0/16
 
     #copying credentials to regular user - vagrant
     echo "copying credentials to regular user - vagrant"
@@ -154,11 +166,6 @@ $configureMaster = <<-SCRIPT
     chown $(id -u vagrant):$(id -g vagrant) /home/vagrant/.kube/config
 
     export KUBECONFIG=/etc/kubernetes/admin.conf
-
-    # install Calico pod network addon
-    #echo "Executing Calico pod network addon"
-    #kubectl apply -f https://raw.githubusercontent.com/ecomm-integration-ballerina/kubernetes-cluster/master/calico/rbac-kdd.yaml
-    #kubectl apply -f https://raw.githubusercontent.com/ecomm-integration-ballerina/kubernetes-cluster/master/calico/calico.yaml
 
     echo "Executing Flannel pod network addon"
     #kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
@@ -194,6 +201,12 @@ EOF
   kubectl apply -f /root/metallb.yaml
   kubectl apply -f /root/metallb_configmap.yaml
 
+  # deployment of an example LoadBalancer type
+  echo "Creating an example LoadBalancer service to demonstrate the load balancer of metallb"
+  kubectl run source-ip-app --image=k8s.gcr.io/echoserver:1.4
+  kubectl expose deployment source-ip-app --name=loadbalancer --port=80 --target-port=8080 --type=LoadBalancer
+  kubectl get svc loadbalancer
+  kubectl patch svc loadbalancer -p '{"spec":{"externalTrafficPolicy":"Local"}}'
 
     # create the join cluster command for the slave nodes to execute
     kubeadm token create --print-join-command >> /etc/kubeadm_join_cmd.sh
@@ -210,7 +223,7 @@ SCRIPT
 $configureNode = <<-SCRIPT
     echo "This is worker"
     apt-get install -y sshpass
-    sshpass -p "vagrant" scp -o StrictHostKeyChecking=no vagrant@192.168.205.10:/etc/kubeadm_join_cmd.sh .
+    sshpass -p "vagrant" scp -o StrictHostKeyChecking=no vagrant@192.168.33.11:/etc/kubeadm_join_cmd.sh .
     echo  "configureNode joing cluster"
     sh ./kubeadm_join_cmd.sh
     echo  "finished configureNode"
@@ -257,6 +270,7 @@ EOF
   service bird restart
   echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/55-kubeadm.conf
   sysctl -p /etc/sysctl.d/55-kubeadm.conf
+  sudo apt install inetutils-traceroute
 SCRIPT
 
 Vagrant.configure("2") do |config|
@@ -267,12 +281,12 @@ Vagrant.configure("2") do |config|
             config.vm.box = opts[:box]
             config.vm.box_version = opts[:box_version]
             config.vm.hostname = opts[:name]
-            config.vm.network :private_network, ip: opts[:eth1]
+            config.vm.network :private_network, ip: opts[:eth1] , virtualbox__intnet: "k8s-metallb-net"
 
             config.vm.provider "virtualbox" do |v|
 
                 v.name = opts[:name]
-            	v.customize ["modifyvm", :id, "--groups", "/K8 Development"]
+            	v.customize ["modifyvm", :id, "--groups", "/K8S MetalLB Dev"]
                 v.customize ["modifyvm", :id, "--memory", opts[:mem]]
                 v.customize ["modifyvm", :id, "--cpus", opts[:cpu]]
 
@@ -290,8 +304,7 @@ Vagrant.configure("2") do |config|
             end
         end
     end
-
-  # now configure a router
+ # now configure a router
   config.vm.define "router" do |router|
     router.vm.box = "ubuntu/bionic64"
     router.vm.network "public_network", bridge: "em1", ip: "192.168.102.254"
@@ -309,10 +322,12 @@ Vagrant.configure("2") do |config|
      router.ssh.insert_key = false
      router.vm.provision "shell", inline: $configureRouter
      router.vm.provider "virtualbox" do |v|
+       v.name = "router"
        v.customize ["modifyvm", :id, "--ostype", "Debian_64"]
-       v.customize ["modifyvm", :id, "--groups", "/K8 Development"]
+       v.customize ["modifyvm", :id, "--groups", "/K8S MetalLB Dev"]
        v.cpus = 1
        v.memory = 512
      end
   end
+
 end 
